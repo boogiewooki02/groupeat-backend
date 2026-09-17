@@ -3,8 +3,11 @@ package com.groupeat.domain.payment.service;
 import com.groupeat.domain.cart.service.CartService;
 import com.groupeat.domain.notification.event.NewOrderRequestNotificationEvent;
 import com.groupeat.domain.orders.service.OrderStoreBlockService;
+import com.groupeat.domain.orders.enums.OrderCancelledBy;
+import com.groupeat.domain.orders.enums.OrderStatus;
 import com.groupeat.domain.payment.converter.PaymentConverter;
 import com.groupeat.domain.payment.dto.PreparedPaymentConfirm;
+import com.groupeat.domain.payment.dto.PaymentCancelResult;
 import com.groupeat.domain.payment.dto.request.PaymentConfirmRequest;
 import com.groupeat.domain.payment.dto.response.PaymentConfirmResponse;
 import com.groupeat.domain.payment.dto.toss.TossPaymentConfirmResponse;
@@ -82,6 +85,41 @@ public class PaymentConfirmTransactionService {
         cartService.clearCart(payment.getMemberId());
 
         return PaymentConverter.toConfirmResponse(payment);
+    }
+
+    // 결제 자동 취소 전에 실제 승인 반영 여부 확인
+    @Transactional(readOnly = true)
+    public PaymentConfirmResponse prepareApprovalFailureCancel(Long paymentId, String paymentKey) {
+        Payment payment = paymentRepository.findById(paymentId)
+                .orElseThrow(() -> new GeneralException(PaymentErrorStatus.PAYMENT_NOT_FOUND));
+        validateAlreadyConfirmedPayment(payment, paymentKey);
+        if (payment.getPaymentStatus() == PaymentStatus.DONE) {
+            return PaymentConverter.toConfirmResponse(payment);
+        }
+        validateApprovalFailureCancelable(payment);
+        return null;
+    }
+
+    @Transactional
+    public void cancelAfterApprovalFailure(
+            Long paymentId, String paymentKey, String cancelReason, PaymentCancelResult cancelResult
+    ) {
+        Payment payment = paymentRepository.findById(paymentId)
+                .orElseThrow(() -> new GeneralException(PaymentErrorStatus.PAYMENT_NOT_FOUND));
+        validateAlreadyConfirmedPayment(payment, paymentKey);
+        validateApprovalFailureCancelable(payment);
+        payment.cancel(cancelResult.refundedAmount(), cancelResult.canceledAt(), cancelResult.lastTransactionKey());
+        if (payment.getOrder() != null) {
+            payment.getOrder().cancel(cancelReason, OrderCancelledBy.SYSTEM, null,
+                    100, cancelResult.refundedAmount(), cancelResult.canceledAt());
+        }
+    }
+
+    private void validateApprovalFailureCancelable(Payment payment) {
+        if (payment.getPaymentStatus() != PaymentStatus.IN_PROGRESS
+                || (payment.getOrder() != null && payment.getOrder().getOrderStatus() != OrderStatus.PENDING)) {
+            throw new GeneralException(PaymentErrorStatus.PAYMENT_INVALID_STATUS);
+        }
     }
 
     // 실패한 승인 반영 트랜잭션과 분리하여 복구 필요 상태 저장

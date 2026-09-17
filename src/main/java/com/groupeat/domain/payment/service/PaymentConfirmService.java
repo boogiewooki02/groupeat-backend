@@ -2,9 +2,11 @@ package com.groupeat.domain.payment.service;
 
 import com.groupeat.domain.payment.client.TossPaymentClient;
 import com.groupeat.domain.payment.dto.PreparedPaymentConfirm;
+import com.groupeat.domain.payment.dto.PaymentCancelResult;
 import com.groupeat.domain.payment.dto.request.PaymentConfirmRequest;
 import com.groupeat.domain.payment.dto.response.PaymentConfirmResponse;
 import com.groupeat.domain.payment.dto.toss.TossPaymentConfirmRequest;
+import com.groupeat.domain.payment.dto.toss.TossPaymentCancelRequest;
 import com.groupeat.domain.payment.dto.toss.TossPaymentConfirmResponse;
 import com.groupeat.domain.payment.enums.TossPaymentStatus;
 import com.groupeat.domain.payment.exception.PaymentErrorStatus;
@@ -22,6 +24,7 @@ public class PaymentConfirmService {
 
     private static final String RECONCILIATION_FAILED_CODE = "PAYMENT_RECONCILIATION_FAILED";
     private static final String INVALID_CONFIRM_RESPONSE_CODE = "INVALID_TOSS_CONFIRM_RESPONSE";
+    private static final String APPROVAL_FAILURE_CANCEL_REASON = "결제 승인 후 주문 처리 실패로 자동 취소";
 
     private final TossPaymentClient tossPaymentClient;
     private final PaymentConfirmTransactionService paymentConfirmTransactionService;
@@ -70,6 +73,7 @@ public class PaymentConfirmService {
     ) {
         log.warn("결제 상태 재조회 및 내부 반영 시도. paymentId={}, orderId={}, initialFailure={}",
                 preparedPayment.paymentId(), preparedPayment.orderId(), describeFailure(initialFailure), initialFailure);
+        boolean approvalConfirmed = false;
         try {
             TossPaymentConfirmResponse payment = tossPaymentClient.getPayment(paymentKey);
             if (payment == null
@@ -80,6 +84,7 @@ public class PaymentConfirmService {
             }
             TossPaymentStatus status = TossPaymentStatus.from(payment.status());
             if (status == TossPaymentStatus.DONE) {
+                approvalConfirmed = true;
                 return paymentConfirmTransactionService.approvePayment(preparedPayment.paymentId(), payment);
             }
             if (status.isFailed()) {
@@ -92,11 +97,62 @@ public class PaymentConfirmService {
                 throw new IllegalStateException("토스 결제 결과 확인이 필요합니다. status=" + payment.status());
             }
         } catch (RuntimeException e) {
+            if (approvalConfirmed) {
+                return cancelAfterApprovalFailure(preparedPayment, paymentKey, initialFailure, e);
+            }
             recordReconciliationRequired(preparedPayment, initialFailure, e);
             throw new GeneralException(PaymentErrorStatus.PAYMENT_RECONCILIATION_REQUIRED);
         }
 
         throw new GeneralException(PaymentErrorStatus.TOSS_CONFIRM_FAILED);
+    }
+
+    private PaymentConfirmResponse cancelAfterApprovalFailure(
+            PreparedPaymentConfirm preparedPayment, String paymentKey,
+            RuntimeException initialFailure, RuntimeException approvalFailure
+    ) {
+        try {
+            PaymentConfirmResponse confirmed = paymentConfirmTransactionService.prepareApprovalFailureCancel(
+                    preparedPayment.paymentId(), paymentKey);
+            if (confirmed != null) {
+                return confirmed;
+            }
+
+            log.warn("결제 내부 반영 재시도 실패. 전액 취소를 시도합니다. paymentId={}, orderId={}",
+                    preparedPayment.paymentId(), preparedPayment.orderId(), approvalFailure);
+            TossPaymentConfirmResponse canceled = tossPaymentClient.cancelPayment(
+                    paymentKey, TossPaymentCancelRequest.of(APPROVAL_FAILURE_CANCEL_REASON, null));
+            validateFullCancelResponse(canceled, preparedPayment, paymentKey);
+
+            PaymentCancelResult cancelResult = PaymentCancelResult.from(canceled, preparedPayment.paidAmount());
+            log.info("토스 전액 취소 확인. paymentId={}, orderId={}, refundedAmount={}, transactionKey={}",
+                    preparedPayment.paymentId(), preparedPayment.orderId(),
+                    cancelResult.refundedAmount(), cancelResult.lastTransactionKey());
+            paymentConfirmTransactionService.cancelAfterApprovalFailure(
+                    preparedPayment.paymentId(), paymentKey, APPROVAL_FAILURE_CANCEL_REASON, cancelResult);
+        } catch (RuntimeException cancelFailure) {
+            RuntimeException recoveryFailure = new IllegalStateException(
+                    "approvalFailure=%s; cancelFailure=%s"
+                            .formatted(describeFailure(approvalFailure), describeFailure(cancelFailure)),
+                    cancelFailure);
+            recordReconciliationRequired(preparedPayment, initialFailure, recoveryFailure);
+            throw new GeneralException(PaymentErrorStatus.PAYMENT_RECONCILIATION_REQUIRED);
+        }
+
+        throw new GeneralException(PaymentErrorStatus.PAYMENT_CANCELED_AFTER_CONFIRM_FAILURE);
+    }
+
+    private void validateFullCancelResponse(
+            TossPaymentConfirmResponse response, PreparedPaymentConfirm preparedPayment, String paymentKey
+    ) {
+        if (response == null
+                || TossPaymentStatus.from(response.status()) != TossPaymentStatus.CANCELED
+                || !paymentKey.equals(response.paymentKey())
+                || !preparedPayment.orderId().equals(response.orderId())
+                || !preparedPayment.paidAmount().equals(response.totalAmount())
+                || !Integer.valueOf(0).equals(response.balanceAmount())) {
+            throw new IllegalStateException("토스 전액 취소 결과를 확인할 수 없습니다.");
+        }
     }
 
     private void recordReconciliationRequired(
