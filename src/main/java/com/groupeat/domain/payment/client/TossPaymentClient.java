@@ -49,6 +49,16 @@ public class TossPaymentClient {
         }
     }
 
+    // 토스페이먼츠 결제 상태 조회
+    public TossPaymentConfirmResponse getPayment(String paymentKey) {
+        return restClientBuilder.build()
+                .get()
+                .uri(properties.cancelBaseUrl() + "/{paymentKey}", paymentKey)
+                .header(HttpHeaders.AUTHORIZATION, createAuthorizationHeader())
+                .retrieve()
+                .body(TossPaymentConfirmResponse.class);
+    }
+
     // 토스페이먼츠 결제 취소 요청
     public TossPaymentConfirmResponse cancelPayment(String paymentKey, TossPaymentCancelRequest request) {
         try {
