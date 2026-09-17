@@ -61,6 +61,11 @@ public class PaymentConfirmTransactionService {
         Payment payment = paymentRepository.findById(paymentId)
                 .orElseThrow(() -> new GeneralException(PaymentErrorStatus.PAYMENT_NOT_FOUND));
 
+        if (payment.getPaymentStatus() == PaymentStatus.DONE) {
+            validateAlreadyConfirmedPayment(payment, tossResponse.paymentKey());
+            return PaymentConverter.toConfirmResponse(payment);
+        }
+
         payment.approve(
                 tossResponse.paymentKey(),
                 tossResponse.method(),
@@ -77,6 +82,16 @@ public class PaymentConfirmTransactionService {
         cartService.clearCart(payment.getMemberId());
 
         return PaymentConverter.toConfirmResponse(payment);
+    }
+
+    // 실패한 승인 반영 트랜잭션과 분리하여 복구 필요 상태 저장
+    @Transactional
+    public void markReconciliationRequired(Long paymentId, String failureCode, String failureMessage) {
+        Payment payment = paymentRepository.findById(paymentId)
+                .orElseThrow(() -> new GeneralException(PaymentErrorStatus.PAYMENT_NOT_FOUND));
+        if (payment.getPaymentStatus() == PaymentStatus.IN_PROGRESS) {
+            payment.markReconciliationRequired(failureCode, failureMessage);
+        }
     }
 
     // 결제 실패 상태 저장
@@ -111,6 +126,10 @@ public class PaymentConfirmTransactionService {
 
     // 승인 요청은 아직 처리되지 않은 READY 상태에서만 허용
     private void validateConfirmableStatus(Payment payment, String requestPaymentKey, String idempotencyKey) {
+        if (payment.getPaymentStatus() == PaymentStatus.RECONCILIATION_REQUIRED) {
+            throw new GeneralException(PaymentErrorStatus.PAYMENT_RECONCILIATION_REQUIRED);
+        }
+
         if (payment.getPaymentStatus() == PaymentStatus.READY) {
             return;
         }

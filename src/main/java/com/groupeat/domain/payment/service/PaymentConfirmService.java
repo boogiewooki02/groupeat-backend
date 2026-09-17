@@ -10,9 +10,11 @@ import com.groupeat.domain.payment.exception.PaymentErrorStatus;
 import com.groupeat.domain.payment.exception.TossPaymentException;
 import com.groupeat.global.exception.GeneralException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class PaymentConfirmService {
 
@@ -28,13 +30,12 @@ public class PaymentConfirmService {
             return preparedPayment.alreadyConfirmedResponse();
         }
 
+        TossPaymentConfirmResponse tossResponse;
         try {
-            TossPaymentConfirmResponse tossResponse = tossPaymentClient.confirmPayment(
+            tossResponse = tossPaymentClient.confirmPayment(
                     TossPaymentConfirmRequest.from(request),
                     idempotencyKey
             );
-            validateTossConfirmResponse(tossResponse, preparedPayment);
-            return paymentConfirmTransactionService.approvePayment(preparedPayment.paymentId(), tossResponse);
         } catch (TossPaymentException e) {
             if (TOSS_IDEMPOTENT_REQUEST_PROCESSING.equals(e.getTossErrorCode())) {
                 throw new GeneralException(PaymentErrorStatus.PAYMENT_CONFIRM_IN_PROGRESS);
@@ -43,6 +44,40 @@ public class PaymentConfirmService {
             // TODO: 결제 실패 보상 PR에서 승인 실패/타임아웃/재조회 정책을 구체화
             paymentConfirmTransactionService.failPayment(preparedPayment.paymentId(), e.getTossErrorCode(), e.getTossErrorMessage());
             throw new GeneralException(PaymentErrorStatus.TOSS_CONFIRM_FAILED);
+        }
+
+        validateTossConfirmResponse(tossResponse, preparedPayment);
+        try {
+            return paymentConfirmTransactionService.approvePayment(preparedPayment.paymentId(), tossResponse);
+        } catch (RuntimeException e) {
+            log.warn("결제 승인 후 내부 반영 실패. 토스 재조회 후 재시도합니다. paymentId={}, orderId={}",
+                    preparedPayment.paymentId(), preparedPayment.orderId(), e);
+            return retryApproval(preparedPayment, request.paymentKey());
+        }
+    }
+
+    private PaymentConfirmResponse retryApproval(PreparedPaymentConfirm preparedPayment, String paymentKey) {
+        try {
+            TossPaymentConfirmResponse payment = tossPaymentClient.getPayment(paymentKey);
+            if (payment == null
+                    || !TOSS_DONE_STATUS.equals(payment.status())
+                    || !paymentKey.equals(payment.paymentKey())
+                    || !preparedPayment.orderId().equals(payment.orderId())
+                    || !preparedPayment.paidAmount().equals(payment.totalAmount())) {
+                throw new IllegalStateException("토스 재조회 결과가 승인 완료된 결제 요청과 일치하지 않습니다.");
+            }
+            return paymentConfirmTransactionService.approvePayment(preparedPayment.paymentId(), payment);
+        } catch (RuntimeException e) {
+            log.error("결제 승인 복구 실패. 확인이 필요합니다. paymentId={}, orderId={}",
+                    preparedPayment.paymentId(), preparedPayment.orderId(), e);
+            try {
+                paymentConfirmTransactionService.markReconciliationRequired(
+                        preparedPayment.paymentId(), "PAYMENT_APPROVAL_RECOVERY_FAILED", e.getMessage());
+            } catch (RuntimeException recordException) {
+                log.error("결제 복구 필요 상태 기록 실패. paymentId={}, orderId={}",
+                        preparedPayment.paymentId(), preparedPayment.orderId(), recordException);
+            }
+            throw new GeneralException(PaymentErrorStatus.PAYMENT_RECONCILIATION_REQUIRED);
         }
     }
 

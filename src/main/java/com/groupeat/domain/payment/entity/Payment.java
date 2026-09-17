@@ -153,6 +153,13 @@ public class Payment extends BaseEntity {
         this.paymentStatus = PaymentStatus.DONE;
     }
 
+    // 결제 승인 후 내부 반영 실패
+    public void markReconciliationRequired(String failureCode, String failureMessage) {
+        this.failureCode = failureCode;
+        this.failureMessage = failureMessage;
+        this.paymentStatus = PaymentStatus.RECONCILIATION_REQUIRED;
+    }
+
     // 결제 실패
     public void fail(String failureCode, String failureMessage) {
         this.failureCode = failureCode;
