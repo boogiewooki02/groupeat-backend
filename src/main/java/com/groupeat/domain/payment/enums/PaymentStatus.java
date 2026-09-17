@@ -8,7 +8,7 @@ import lombok.RequiredArgsConstructor;
 public enum PaymentStatus {
     READY("결제 요청 생성"),
     IN_PROGRESS("결제 승인 진행 중"),
-    RECONCILIATION_REQUIRED("결제 승인 내부 반영 확인 필요"),
+    RECONCILIATION_REQUIRED("결제 결과 확인 필요"),
     DONE("결제 승인 완료"),
     FAILED("결제 실패"),
     CANCELED("결제 전액 취소"),

@@ -153,7 +153,7 @@ public class Payment extends BaseEntity {
         this.paymentStatus = PaymentStatus.DONE;
     }
 
-    // 결제 승인 후 내부 반영 실패
+    // 결제 결과 또는 내부 반영 확인 필요
     public void markReconciliationRequired(String failureCode, String failureMessage) {
         this.failureCode = failureCode;
         this.failureMessage = failureMessage;
